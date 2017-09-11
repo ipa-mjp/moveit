@@ -975,12 +975,15 @@ bool TrajectoryExecutionManager::validate(const TrajectoryExecutionContext& cont
       // normalize positions and compare
       jm->enforcePositionBounds(&cur_position);
       jm->enforcePositionBounds(&traj_position);
-      if (fabs(cur_position - traj_position) > 5*allowed_start_tolerance_)
+
+      const double& start_state_tolerance_ = allowed_start_tolerance_ * 30.00;		
+	
+      if (fabs(cur_position - traj_position) > start_state_tolerance_)
       {
         ROS_ERROR_NAMED("traj_execution",
                         "\nInvalid Trajectory: start point deviates from current robot state more than %g"
                         "\njoint '%s': expected: %g, current: %g",
-                        allowed_start_tolerance_, joint_names[i].c_str(), traj_position, cur_position);
+                        start_state_tolerance_, joint_names[i].c_str(), traj_position, cur_position);
         return false;
       }
     }
