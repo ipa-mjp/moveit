@@ -663,6 +663,8 @@ public:
       target. No execution is performed. The resulting plan is stored in \e plan*/
   MoveItErrorCode plan(Plan& plan);
 
+  MoveItErrorCode plan(Plan& plan, moveit_msgs::MoveGroupGoal& goal);
+
   /** \brief Given a \e plan, execute it without waiting for completion. Return true on success. */
   MoveItErrorCode asyncExecute(const Plan& plan);
 
