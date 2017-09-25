@@ -1432,7 +1432,7 @@ moveit::planning_interface::MoveItErrorCode moveit::planning_interface::MoveGrou
   return impl_->plan(plan);
 }
 
-moveit::planning_interface::MoveItErrorCode moveit::planning_interface::MoveGroupInterface::plan(Plan& plan, moveit_msgs::MoveGroupGoal& goal)
+moveit::planning_interface::MoveItErrorCode moveit::planning_interface::MoveGroup::plan(Plan& plan, moveit_msgs::MoveGroupGoal& goal)
 {
   return impl_->plan(plan, goal);
 }
