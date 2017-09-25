@@ -50,6 +50,10 @@
 #include <boost/shared_ptr.hpp>
 #include <tf/tf.h>
 
+
+#include <moveit_msgs/MoveGroupGoal.h>
+#include <moveit_msgs/MoveGroupAction.h>
+
 namespace moveit
 {
 /** \brief Simple interface to MoveIt! components */
