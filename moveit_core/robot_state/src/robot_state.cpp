@@ -42,6 +42,7 @@
 #include <moveit/backtrace/backtrace.h>
 #include <moveit/profiler/profiler.h>
 #include <boost/bind.hpp>
+#include <moveit/robot_model/aabb.h>
 
 moveit::core::RobotState::RobotState(const RobotModelConstPtr& robot_model)
   : robot_model_(robot_model)
@@ -1562,7 +1563,12 @@ bool moveit::core::RobotState::setFromIK(const JointModelGroup* jmg, const Eigen
     // Make sure one of the tip frames worked
     if (!found_valid_frame)
     {
-      logError("moveit.robot_state: Cannot compute IK for query pose reference frame '%s'", pose_frame.c_str());
+      logError("moveit.robot_state: Cannot compute IK for query %u pose reference frame '%s'", i, pose_frame.c_str());
+      // Debug available tip frames
+      std::stringstream ss;
+      for (solver_tip_id = 0; solver_tip_id < solver_tip_frames.size(); ++solver_tip_id)
+        ss << solver_tip_frames[solver_tip_id] << ", ";
+      logError("Available tip frames: [%s]", ss.str().c_str());
       return false;
     }
 
@@ -1925,9 +1931,6 @@ double moveit::core::RobotState::computeCartesianPath(const JointModelGroup* gro
   traj.clear();
   traj.push_back(RobotStatePtr(new RobotState(*this)));
 
-  std::vector<double> dist_vector;
-  double total_dist = 0.0;
-
   double last_valid_percentage = 0.0;
   Eigen::Quaterniond start_quaternion(start_pose.rotation());
   Eigen::Quaterniond target_quaternion(rotated_target.rotation());
@@ -1941,35 +1944,46 @@ double moveit::core::RobotState::computeCartesianPath(const JointModelGroup* gro
     if (setFromIK(group, pose, link->getName(), 1, 0.0, validCallback, options))
     {
       traj.push_back(RobotStatePtr(new RobotState(*this)));
-
-      // compute the distance to the previous point (infinity norm)
-      if (test_joint_space_jump)
-      {
-        double dist_prev_point = traj.back()->distance(*traj[traj.size() - 2], group);
-        dist_vector.push_back(dist_prev_point);
-        total_dist += dist_prev_point;
-      }
     }
     else
       break;
     last_valid_percentage = percentage;
   }
 
-  if (test_joint_space_jump && !dist_vector.empty())
+  if (test_joint_space_jump)
   {
-    // compute the average distance between the states we looked at
-    double thres = jump_threshold * (total_dist / (double)dist_vector.size());
-    for (std::size_t i = 0; i < dist_vector.size(); ++i)
-      if (dist_vector[i] > thres)
-      {
-        logDebug("Truncating Cartesian path due to detected jump in joint-space distance");
-        last_valid_percentage = (double)i / (double)steps;
-        traj.resize(i);
-        break;
-      }
+    last_valid_percentage *= testJointSpaceJump(group, traj, jump_threshold);
   }
 
   return last_valid_percentage;
+}
+
+double moveit::core::RobotState::testJointSpaceJump(const JointModelGroup* group, std::vector<RobotStatePtr>& traj,
+                                                    double jump_threshold)
+{
+  std::vector<double> dist_vector;
+  dist_vector.reserve(traj.size() - 1);
+  double total_dist = 0.0;
+  for (std::size_t i = 1; i < traj.size(); ++i)
+  {
+    double dist_prev_point = traj[i]->distance(*traj[i - 1], group);
+    dist_vector.push_back(dist_prev_point);
+    total_dist += dist_prev_point;
+  }
+
+  double percentage = 1.0;
+  // compute the average distance between the states we looked at
+  double thres = jump_threshold * (total_dist / (double)dist_vector.size());
+  for (std::size_t i = 0; i < dist_vector.size(); ++i)
+    if (dist_vector[i] > thres)
+    {
+      logDebug("Truncating Cartesian path due to detected jump in joint-space distance");
+      percentage = (double)i / (double)dist_vector.size();
+      traj.resize(i);
+      break;
+    }
+
+  return percentage;
 }
 
 double moveit::core::RobotState::computeCartesianPath(const JointModelGroup* group, std::vector<RobotStatePtr>& traj,
@@ -1982,9 +1996,11 @@ double moveit::core::RobotState::computeCartesianPath(const JointModelGroup* gro
   double percentage_solved = 0.0;
   for (std::size_t i = 0; i < waypoints.size(); ++i)
   {
+    // Don't test joint space jumps for every waypoint, test them later on the whole trajectory.
+    static const double no_joint_space_jump_test = 0.0;
     std::vector<RobotStatePtr> waypoint_traj;
     double wp_percentage_solved = computeCartesianPath(group, waypoint_traj, link, waypoints[i], global_reference_frame,
-                                                       max_step, jump_threshold, validCallback, options);
+                                                       max_step, no_joint_space_jump_test, validCallback, options);
     if (fabs(wp_percentage_solved - 1.0) < std::numeric_limits<double>::epsilon())
     {
       percentage_solved = (double)(i + 1) / (double)waypoints.size();
@@ -2004,70 +2020,48 @@ double moveit::core::RobotState::computeCartesianPath(const JointModelGroup* gro
     }
   }
 
-  return percentage_solved;
-}
+  if (jump_threshold > 0.0)
+  {
+    percentage_solved *= testJointSpaceJump(group, traj, jump_threshold);
+  }
 
-namespace
-{
-static inline void updateAABB(const Eigen::Affine3d& t, const Eigen::Vector3d& e, std::vector<double>& aabb)
-{
-  Eigen::Vector3d v = e / 2.0;
-  Eigen::Vector3d c2 = t * v;
-  v = -v;
-  Eigen::Vector3d c1 = t * v;
-  if (aabb.empty())
-  {
-    aabb.resize(6);
-    aabb[0] = c1.x();
-    aabb[2] = c1.y();
-    aabb[4] = c1.z();
-    aabb[1] = c2.x();
-    aabb[3] = c2.y();
-    aabb[5] = c2.z();
-  }
-  else
-  {
-    if (aabb[0] > c1.x())
-      aabb[0] = c1.x();
-    if (aabb[2] > c1.y())
-      aabb[2] = c1.y();
-    if (aabb[4] > c1.z())
-      aabb[4] = c1.z();
-    if (aabb[1] < c2.x())
-      aabb[1] = c2.x();
-    if (aabb[3] < c2.y())
-      aabb[3] = c2.y();
-    if (aabb[5] < c2.z())
-      aabb[5] = c2.z();
-  }
-}
+  return percentage_solved;
 }
 
 void robot_state::RobotState::computeAABB(std::vector<double>& aabb) const
 {
   BOOST_VERIFY(checkLinkTransforms());
 
-  aabb.clear();
+  core::AABB bounding_box;
   std::vector<const LinkModel*> links = robot_model_->getLinkModelsWithCollisionGeometry();
   for (std::size_t i = 0; i < links.size(); ++i)
   {
-    const Eigen::Affine3d& t = getGlobalLinkTransform(links[i]);
-    const Eigen::Vector3d& e = links[i]->getShapeExtentsAtOrigin();
-    updateAABB(t, e, aabb);
+    Eigen::Affine3d transform = getGlobalLinkTransform(links[i]);  // intentional copy, we will translate
+    const Eigen::Vector3d& extents = links[i]->getShapeExtentsAtOrigin();
+    transform.translate(links[i]->getCenteredBoundingBoxOffset());
+    bounding_box.extendWithTransformedBox(transform, extents);
   }
   for (std::map<std::string, AttachedBody*>::const_iterator it = attached_body_map_.begin();
        it != attached_body_map_.end(); ++it)
   {
-    const EigenSTL::vector_Affine3d& ts = it->second->getGlobalCollisionBodyTransforms();
-    const std::vector<shapes::ShapeConstPtr>& ss = it->second->getShapes();
-    for (std::size_t i = 0; i < ts.size(); ++i)
+    const EigenSTL::vector_Affine3d& transforms = it->second->getGlobalCollisionBodyTransforms();
+    const std::vector<shapes::ShapeConstPtr>& shapes = it->second->getShapes();
+    for (std::size_t i = 0; i < transforms.size(); ++i)
     {
-      Eigen::Vector3d e = shapes::computeShapeExtents(ss[i].get());
-      updateAABB(ts[i], e, aabb);
+      Eigen::Vector3d extents = shapes::computeShapeExtents(shapes[i].get());
+      bounding_box.extendWithTransformedBox(transforms[i], extents);
     }
   }
-  if (aabb.empty())
-    aabb.resize(6, 0.0);
+
+  aabb.clear();
+  aabb.resize(6, 0.0);
+  if (!bounding_box.isEmpty())
+  {
+    // The following is a shorthand for something like:
+    // aabb[0, 2, 4] = bounding_box.min(); aabb[1, 3, 5] = bounding_box.max();
+    Eigen::Map<Eigen::VectorXd, Eigen::Unaligned, Eigen::InnerStride<2> >(aabb.data(), 3) = bounding_box.min();
+    Eigen::Map<Eigen::VectorXd, Eigen::Unaligned, Eigen::InnerStride<2> >(aabb.data() + 1, 3) = bounding_box.max();
+  }
 }
 
 void moveit::core::RobotState::printStatePositions(std::ostream& out) const
